@@ -1,8 +1,8 @@
 # go-sonos: the design
 
-Research into controlling Sonos speakers, done on 2026-11-15 from public sources, to
-decide what a Go module for them would be. Nothing is built and nothing here was run
-against a speaker. The decisions at the end are open.
+Research into controlling Sonos speakers, done on 2026-11-15 from public sources, and the
+module built from it. The module follows what was read; nothing here was run against a
+speaker.
 
 In short: Sonos speakers are controlled entirely on the LAN, over UPnP: SOAP calls to
 each speaker on port 1400. It covers playback, volume, grouping, favourites, the queue,
@@ -67,15 +67,48 @@ from Sonos was found.
 | Needs | the UPnP setting left on | a sample key that is no contract | an account, a registered integration, a public callback |
 | Covers | everything above | playback, volume, groups | playback, volume, groups, favourites |
 
-## What this module would be
+## What this module is
 
-Not decided. The proposal: **a client of the UPnP API**. Discovery by SSDP, or from one
-speaker's address, since any speaker gives the whole topology; the topology as groups
-and their coordinators; SOAP calls for transport, volume, grouping, favourites and
-inputs; events through a local HTTP listener with its subscriptions renewed.
+**A client of the UPnP API**, of the three ways in: it is local, needs no account, and
+covers everything the others do.
 
-The shape is the one go-wemo already has for another UPnP device: an SSDP search, device
-and service descriptions, a SOAP caller, an event listener.
+- `sonos`: `Discover` asks one speaker for the household and gives a `System`, its groups
+  with their coordinators and rooms. On it: `Status`, `Play`, `Pause`, `Stop`, `Next`,
+  `Previous` for a group; `Volume`, `SetVolume`, `Muted`, `SetMute` for a room;
+  `GroupVolume` and `SetGroupVolume`; `Join` and `Leave`. The standard library alone.
+- `sonos/sonostest`: a household for tests, one HTTP server per speaker, that refuses a
+  request not shaped as the documentation gives it.
+- `cmd/sonos`: the command, over `internal/cli`.
+
+### Decisions
+
+- **The household comes from one speaker's address.** Any speaker gives the whole
+  topology, so one address is enough, and a search by multicast does not pass every
+  network. The search is not built.
+- **The services' types and control URLs are constants**, as the documentation gives
+  them, and not read from each speaker's device description: one request per action, and
+  the documentation gives the same paths for every speaker.
+- **A room is a speaker a person sees.** The topology marks the second speaker of a
+  pair, a surround, a sub and a bridge as invisible; they are in no list, and a group
+  with no room in it is left out.
+- **Transport goes to the group's coordinator, volume to the room.** The documentation
+  has a speaker that does not coordinate answer PLAYING whatever its group does, so
+  nothing about playback is asked of one. A group's volume is set after a snapshot,
+  which is what the speakers scale each room from.
+- **A `System` is the household at one moment.** It follows no change; after a `Join` or
+  a `Leave` it is read again.
+- **What a speaker refuses is told apart**: a UPnP fault with its code, a 403, and an
+  answer that is not the documented SOAP. The 403 is what Home Assistant's page gives for
+  the UPnP setting turned off: "403 Client Error: Forbidden", "This error means UPnP is
+  not properly enabled on your Sonos system". The community's documentation of the
+  services says nothing of it.
+
+### Not built
+
+Events, so nothing follows a change as it happens. Favourites, the queue, the inputs and
+alarms. Discovery by SSDP. The SOAP caller is this module's own and does what these
+actions need; go-wemo holds a fuller UPnP stack, with service descriptions and events,
+for another device.
 
 [sonoscli](https://github.com/steipete/sonoscli) is a Go command that does all of this,
 active, with its code not importable; it is a reference. The Go libraries found are
@@ -90,7 +123,10 @@ unmaintained.
 
 ## Not verified
 
-- Nothing above was observed on a speaker.
+- Nothing above was observed on a speaker, and the module was run against its own
+  stand-in only.
+- What a speaker answers a transport action when it does not coordinate its group.
+- Whether every model serves the services at the documented paths.
 - The event subscription's details were not read in a primary source.
 - Which software versions carry the UPnP setting: the page names none.
 - What the port 1443 interface covers beyond what its open clients use.
@@ -102,6 +138,8 @@ unmaintained.
   service list.
 - [Sonos, adjust connection security settings](https://support.sonos.com/en/article/adjust-connection-security-settings):
   the UPnP and Authentication settings and their defaults.
+- [Home Assistant, Sonos](https://www.home-assistant.io/integrations/sonos/): the 403 a
+  speaker answers with the UPnP setting off, and where the setting is in the app.
 - Sonos developer documentation: [control](https://docs.sonos.com/docs/control),
   [authorize](https://docs.sonos.com/docs/authorize).
 - [sonoscli](https://github.com/steipete/sonoscli): a Go command on the UPnP API.
