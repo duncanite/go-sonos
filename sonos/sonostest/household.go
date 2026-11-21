@@ -1,7 +1,9 @@
 // Package sonostest is a Sonos household for tests: one HTTP server per
 // speaker, each answering the UPnP actions this module calls, as the
 // community's documentation of the services gives them, over a state the
-// test reads and sets. It records what each speaker was asked.
+// test reads and sets, and taking subscriptions to the events of its
+// transport, its volume and the household's groups. It records what each
+// speaker was asked.
 //
 // Three things here are not from that documentation. What a speaker
 // answers a transport action when it does not coordinate its group: the
@@ -10,10 +12,17 @@
 // SOAPAction header, instance or channel is not the documented one, so a
 // test fails on a request a speaker might still take. And the 403 of
 // Forbid, which is Home Assistant's account of a system with UPnP off.
+//
+// The events are written as SoCo reads them, a LastChange document with a
+// variable per element and its value in val, since the community's
+// documentation names the variables and not the document. What goes into
+// one event is the fake's own: everything at a subscription's start, and
+// after that the variables an action changed and no other.
 package sonostest
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"html"
@@ -23,6 +32,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+)
+
+// The services a speaker takes subscriptions to, as its paths name them.
+const (
+	Transport = "AVTransport"
+	Rendering = "RenderingControl"
+	Topology  = "ZoneGroupTopology"
 )
 
 const (
@@ -53,7 +69,9 @@ type Speaker struct {
 	// Calls is every action it received, "Service.Action", in order.
 	Calls []string
 
-	house *Household
+	house       *Household
+	subscribers []*subscriber
+	requests    []string
 }
 
 // Household is the fake. A test sets its exported fields, and its
@@ -80,6 +98,23 @@ type Household struct {
 	// Raw, when not nil, is the whole body every speaker answers with,
 	// under a 200.
 	Raw []byte
+	// ID is the household's identity, the same from every speaker.
+	ID string
+	// Deaf makes every speaker refuse a new subscription, with a 503.
+	Deaf bool
+	// Lease is what a speaker answers a subscription's length with.
+	Lease string
+	// Silent makes every speaker take subscriptions and send no event, as
+	// one that cannot reach the callback it was given.
+	Silent bool
+
+	// life ends with the household, and with it what is still to send.
+	life  context.Context //nolint:containedctx // the fake's own life, from New to Close
+	end   context.CancelFunc
+	post  chan delivery
+	posts sync.WaitGroup
+	// issued counts the subscriptions given, for their ids.
+	issued int
 }
 
 // New starts a household with one speaker per name, each playing alone at
@@ -91,7 +126,13 @@ func New(names ...string) *Household {
 		URI:      map[string]string{},
 		Position: map[string]string{},
 		Duration: map[string]string{},
+		ID:       "Sonos_0000000000000000000000000000000001",
+		Lease:    "Second-3600",
+		post:     make(chan delivery, maxPosts),
 	}
+
+	house.life, house.end = context.WithCancel(context.Background())
+	house.posts.Go(house.deliver)
 
 	for index, name := range names {
 		speaker := &Speaker{
@@ -108,8 +149,11 @@ func New(names ...string) *Household {
 	return house
 }
 
-// Close stops every speaker.
+// Close stops every speaker, and what was still to send.
 func (h *Household) Close() {
+	h.end()
+	h.posts.Wait()
+
 	for _, speaker := range h.Speakers {
 		speaker.Close()
 	}
@@ -151,6 +195,12 @@ func (s *Speaker) serve(writer http.ResponseWriter, req *http.Request) {
 	s.house.mu.Lock()
 	defer s.house.mu.Unlock()
 
+	if req.Method == subscribe || req.Method == unsubscribe {
+		s.subscription(writer, req)
+
+		return
+	}
+
 	raw, _ := io.ReadAll(io.LimitReader(req.Body, maxBody))
 
 	var asked request
@@ -164,8 +214,7 @@ func (s *Speaker) serve(writer http.ResponseWriter, req *http.Request) {
 		args[arg.XMLName.Local] = arg.Value
 	}
 
-	service := strings.TrimSuffix(strings.TrimPrefix(req.URL.Path, "/MediaRenderer"), "/Control")
-	service = strings.Trim(service, "/")
+	service := served(req.URL.Path, "/Control")
 	s.Calls = append(s.Calls, service+"."+action)
 
 	writer.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
@@ -189,6 +238,11 @@ func (s *Speaker) serve(writer http.ResponseWriter, req *http.Request) {
 
 	// #nosec G705 -- a test's stand-in answering this module's own client in XML; no browser reads it
 	_, _ = writer.Write(body)
+}
+
+// served is the service a path names, under what its URLs end with.
+func served(path, end string) string {
+	return strings.Trim(strings.TrimSuffix(strings.TrimPrefix(path, "/MediaRenderer"), end), "/")
 }
 
 // envelope is the SOAP answer: the action's response with its elements,
@@ -230,7 +284,7 @@ func (s *Speaker) asked(header, service, action string, args map[string]string) 
 	channel, takesChannel := args["Channel"]
 
 	switch {
-	case service != "ZoneGroupTopology" && (!takesInstance || instance != "0"),
+	case service != Topology && service != "DeviceProperties" && (!takesInstance || instance != "0"),
 		takesChannel && channel != "Master",
 		service == "RenderingControl" && !takesChannel,
 		action == "Play" && args["Speed"] != "1":
@@ -249,16 +303,11 @@ func (s *Speaker) act(service, action string, args map[string]string) ([][2]stri
 	switch service + "." + action {
 	case "ZoneGroupTopology.GetZoneGroupState":
 		return [][2]string{{"ZoneGroupState", house.topology()}}, 0
+	case "DeviceProperties.GetHouseholdID":
+		return [][2]string{{"CurrentHouseholdID", house.ID}}, 0
 	case "AVTransport.GetTransportInfo":
-		// The documentation: a speaker that does not coordinate always
-		// answers PLAYING.
-		state := "PLAYING"
-		if coordinates {
-			state = house.state(s.UUID)
-		}
-
 		return [][2]string{
-			{"CurrentTransportState", state}, {"CurrentTransportStatus", "OK"}, {"CurrentSpeed", "1"},
+			{"CurrentTransportState", s.transportState()}, {"CurrentTransportStatus", "OK"}, {"CurrentSpeed", "1"},
 		}, 0
 	case "AVTransport.GetPositionInfo":
 		return [][2]string{
@@ -280,7 +329,11 @@ func (s *Speaker) act(service, action string, args map[string]string) ([][2]stri
 			house.State[s.UUID] = "PAUSED_PLAYBACK"
 		case "Stop":
 			house.State[s.UUID] = "STOPPED"
+		default:
+			return nil, 0
 		}
+
+		s.tell(Transport, lastChange(transportSpace, variable("TransportState", house.State[s.UUID]))...)
 
 		return nil, 0
 	case "AVTransport.SetAVTransportURI":
@@ -291,9 +344,13 @@ func (s *Speaker) act(service, action string, args map[string]string) ([][2]stri
 
 		s.Group = coordinator
 
+		house.regrouped()
+
 		return nil, 0
 	case "AVTransport.BecomeCoordinatorOfStandaloneGroup":
 		s.Group = s.UUID
+
+		house.regrouped()
 
 		return [][2]string{{"DelegatedGroupCoordinatorID", ""}, {"NewGroupID", s.UUID + ":1"}}, 0
 	}
@@ -313,12 +370,14 @@ func (s *Speaker) render(service, action string, args map[string]string) ([][2]s
 		}
 
 		s.Volume = level
+		s.tell(Rendering, lastChange(renderingSpace, s.volume())...)
 
 		return nil, 0
 	case "RenderingControl.GetMute":
 		return [][2]string{{"CurrentMute", flag(s.Muted)}}, 0
 	case "RenderingControl.SetMute":
 		s.Muted = args["DesiredMute"] == "1"
+		s.tell(Rendering, lastChange(renderingSpace, s.mute())...)
 
 		return nil, 0
 	case "GroupRenderingControl.GetGroupVolume", "GroupRenderingControl.SnapshotGroupVolume",
@@ -354,6 +413,7 @@ func (s *Speaker) renderGroup(action string, args map[string]string) ([][2]strin
 
 		for _, member := range members {
 			member.Volume = level
+			member.tell(Rendering, lastChange(renderingSpace, member.volume())...)
 		}
 	}
 
@@ -366,6 +426,17 @@ func flag(set bool) string {
 	}
 
 	return "0"
+}
+
+// transportState is what the speaker says its transport does. The
+// documentation: a speaker that does not coordinate always answers
+// PLAYING.
+func (s *Speaker) transportState() string {
+	if s.Group != s.UUID {
+		return "PLAYING"
+	}
+
+	return s.house.state(s.UUID)
 }
 
 func (h *Household) state(uuid string) string {

@@ -62,15 +62,15 @@ func household(t *testing.T) (*sonostest.Household, *sonos.System) {
 
 	house.Speakers[2].Group = house.Speakers[1].UUID
 
-	return house, discovered(t, house)
+	return house, opened(t, house)
 }
 
-func discovered(t *testing.T, house *sonostest.Household) *sonos.System {
+func opened(t *testing.T, house *sonostest.Household) *sonos.System {
 	t.Helper()
 
-	system, err := sonos.Discover(t.Context(), house.Speakers[0].Client(), house.Speakers[0].Host())
+	system, err := sonos.Open(t.Context(), house.Speakers[0].Client(), house.Speakers[0].Host())
 	if err != nil {
-		t.Fatalf("Discover: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 
 	return system
@@ -87,11 +87,11 @@ func room(t *testing.T, system *sonos.System, name string) (sonos.Player, sonos.
 	return player, group
 }
 
-// TestDiscover: one speaker gives the whole household, its groups with
+// TestOpen: one speaker gives the whole household, its groups with
 // their coordinators and rooms; a speaker that is no room is in no list;
 // a group of none is left out; the older shape of the answer reads the
 // same; a room is found whatever the case of its name.
-func TestDiscover(t *testing.T) {
+func TestOpen(t *testing.T) {
 	t.Parallel()
 
 	house := sonostest.New("Kitchen", "Den", "Porch", "Den", "BRIDGE")
@@ -105,14 +105,14 @@ func TestDiscover(t *testing.T) {
 	for _, bare := range []bool{false, true} {
 		house.Bare = bare
 
-		system := discovered(t, house)
+		system := opened(t, house)
 		if len(system.Groups) != 2 {
-			t.Fatalf("bare %t: Discover found %+v", bare, system.Groups)
+			t.Fatalf("bare %t: Open found %+v", bare, system.Groups)
 		}
 
 		alone, together := system.Groups[0], system.Groups[1]
-		if alone.Coordinator.UUID != kitchen.UUID || len(alone.Members) != 1 ||
-			alone.Members[0] != (sonos.Player{UUID: kitchen.UUID, Name: "Kitchen", Host: kitchen.Host()}) {
+		if alone.Coordinator.ID != sonos.ID(kitchen.UUID) || len(alone.Members) != 1 ||
+			alone.Members[0] != (sonos.Player{ID: sonos.ID(kitchen.UUID), Name: "Kitchen", Host: kitchen.Host()}) {
 			t.Errorf("bare %t: the kitchen's group reads %+v", bare, alone)
 		}
 
@@ -122,7 +122,7 @@ func TestDiscover(t *testing.T) {
 		}
 
 		player, group, err := system.Room("porch")
-		if err != nil || player.UUID != porch.UUID || group.Coordinator.UUID != den.UUID {
+		if err != nil || player.ID != sonos.ID(porch.UUID) || group.Coordinator.ID != sonos.ID(den.UUID) {
 			t.Errorf("bare %t: Room porch = %+v in %+v, %v", bare, player, group, err)
 		}
 	}
@@ -136,7 +136,7 @@ func TestRooms(t *testing.T) {
 	house := sonostest.New("Kitchen", "Den", "Den")
 	t.Cleanup(house.Close)
 
-	system := discovered(t, house)
+	system := opened(t, house)
 
 	_, _, err := system.Room("Garage")
 	if !errors.Is(err, sonos.ErrNoRoom) || !strings.Contains(err.Error(), `"Kitchen", "Den", "Den"`) {
@@ -309,7 +309,7 @@ func TestGrouping(t *testing.T) {
 		t.Fatalf("Join = %v; the kitchen is in %s", err, kitchen.Group)
 	}
 
-	if joined := discovered(t, house); len(joined.Groups) != 1 || len(joined.Groups[0].Members) != 3 {
+	if joined := opened(t, house); len(joined.Groups) != 1 || len(joined.Groups[0].Members) != 3 {
 		t.Fatalf("after the join the household reads %+v", joined.Groups)
 	}
 
@@ -360,8 +360,17 @@ func TestRefusals(t *testing.T) {
 		`&lt;ZoneGroupMember UUID="B" Location="http://127.0.0.1:1400/x" ZoneName="Room"/&gt;` +
 		`&lt;/ZoneGroup&gt;&lt;/ZoneGroups&gt;</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>`)
 
-	if _, err := sonos.Discover(t.Context(), porch.Client(), porch.Host()); !errors.Is(err, sonos.ErrAnswer) {
-		t.Errorf("Discover of a group whose coordinator is no member = %v, want ErrAnswer", err)
+	if _, err := sonos.Open(t.Context(), porch.Client(), porch.Host()); !errors.Is(err, sonos.ErrAnswer) {
+		t.Errorf("Open of a group whose coordinator is no member = %v, want ErrAnswer", err)
+	}
+
+	house.Raw = []byte(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
+		`<u:GetZoneGroupStateResponse><ZoneGroupState>&lt;ZoneGroups&gt;&lt;ZoneGroup Coordinator="A" ID="A:1"&gt;` +
+		`&lt;ZoneGroupMember UUID="A" Location="nowhere" ZoneName="Room"/&gt;` +
+		`&lt;/ZoneGroup&gt;&lt;/ZoneGroups&gt;</ZoneGroupState></u:GetZoneGroupStateResponse></s:Body></s:Envelope>`)
+
+	if _, err := sonos.Open(t.Context(), porch.Client(), porch.Host()); !errors.Is(err, sonos.ErrAnswer) {
+		t.Errorf("Open of a speaker that is nowhere = %v, want ErrAnswer", err)
 	}
 
 	house.Raw = bytes.Repeat([]byte(" "), 4<<20+1)
@@ -373,12 +382,21 @@ func TestRefusals(t *testing.T) {
 	house.Raw = nil
 	house.Forbid = true
 
-	if _, err := sonos.Discover(t.Context(), porch.Client(), porch.Host()); !errors.Is(err, sonos.ErrForbidden) {
-		t.Errorf("Discover with UPnP off = %v, want ErrForbidden", err)
+	if _, err := sonos.Open(t.Context(), porch.Client(), porch.Host()); !errors.Is(err, sonos.ErrForbidden) ||
+		!errors.Is(err, sonos.ErrRefused) {
+		t.Errorf("Open with UPnP off = %v, want ErrForbidden, which is an ErrRefused", err)
 	}
 
-	if _, err := sonos.Discover(t.Context(), porch.Client(), ""); !errors.Is(err, sonos.ErrArgument) {
-		t.Errorf("Discover of no host = %v, want ErrArgument", err)
+	if _, err := system.Household(t.Context()); !errors.Is(err, sonos.ErrForbidden) {
+		t.Errorf("Household with UPnP off = %v, want ErrForbidden", err)
+	}
+
+	if _, err := sonos.Open(t.Context(), nil, porch.Host()); !errors.Is(err, sonos.ErrArgument) {
+		t.Errorf("Open with no client = %v, want ErrArgument", err)
+	}
+
+	if _, err := sonos.Open(t.Context(), porch.Client(), ""); !errors.Is(err, sonos.ErrArgument) {
+		t.Errorf("Open of no host = %v, want ErrArgument", err)
 	}
 }
 
@@ -396,19 +414,24 @@ func (a *asked) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // TestSeed: a speaker named without a port is asked on 1400, an IPv6
-// address in brackets or not; one named with a port, on that port. What
-// the network refuses is none of the module's own errors.
+// address in brackets or not; one named with a port, on that port; one
+// named by the URL of its description, at that URL's host. What the
+// network refuses is none of the module's own errors, and a URL that is no
+// speaker's is ErrArgument with nothing asked.
 func TestSeed(t *testing.T) {
 	t.Parallel()
 
 	transport := &asked{}
 	client := &http.Client{Transport: transport}
 
-	for _, seed := range []string{"192.0.2.10", "192.0.2.10:1500", "2001:db8::1", "[2001:db8::1]", "speaker.test"} {
-		_, err := sonos.Discover(t.Context(), client, seed)
+	for _, seed := range []string{
+		"192.0.2.10", "192.0.2.10:1500", "2001:db8::1", "[2001:db8::1]", "speaker.test",
+		"http://192.0.2.20:1400/xml/device_description.xml", "http://192.0.2.21/xml/device_description.xml",
+	} {
+		_, err := sonos.Open(t.Context(), client, seed)
 		if !errors.Is(err, errNoSpeaker) || errors.Is(err, sonos.ErrAnswer) || errors.Is(err, sonos.ErrRefused) ||
 			errors.Is(err, sonos.ErrArgument) {
-			t.Errorf("Discover of %q with no network = %v", seed, err)
+			t.Errorf("Open of %q with no network = %v", seed, err)
 		}
 	}
 
@@ -418,8 +441,22 @@ func TestSeed(t *testing.T) {
 		"[2001:db8::1]:1400",
 		"[2001:db8::1]:1400",
 		"speaker.test:1400",
+		"192.0.2.20:1400",
+		"192.0.2.21:1400",
 	}
 	if !slices.Equal(transport.hosts, want) {
 		t.Errorf("the speakers asked were %v, want %v", transport.hosts, want)
+	}
+
+	for _, seed := range []string{
+		"https://192.0.2.10:1443/", "ftp://192.0.2.10/", "http:///xml", "http://%zz/", "not a host", "192.0.2.10:port",
+	} {
+		if _, err := sonos.Open(t.Context(), client, seed); !errors.Is(err, sonos.ErrArgument) {
+			t.Errorf("Open of %q = %v, want ErrArgument", seed, err)
+		}
+	}
+
+	if len(transport.hosts) != len(want) {
+		t.Errorf("a URL that is no speaker's was asked: %v", transport.hosts[len(want):])
 	}
 }

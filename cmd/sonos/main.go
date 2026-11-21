@@ -20,9 +20,17 @@ const requestTimeout = 10 * time.Second
 
 func main() {
 	app.Main(&app.Options{Name: "sonos"}, func(ctx context.Context) error {
-		client := &http.Client{Transport: network.NewTransport(), Timeout: requestTimeout}
+		// A speaker's redirect is not followed: it would send a request,
+		// its arguments with it, wherever the speaker points.
+		client := &http.Client{
+			Transport:     network.NewTransport(),
+			Timeout:       requestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 
-		if code := cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr, client); code != cli.ExitOK {
+		env := cli.Environment{Args: os.Args[1:], Out: os.Stdout, Err: os.Stderr, Client: client}
+
+		if code := cli.Run(ctx, env); code != cli.ExitOK {
 			return shutdown.ExitError(code)
 		}
 

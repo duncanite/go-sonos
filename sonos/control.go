@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	upnp "github.com/forkcloser/go-upnp"
 )
 
 // State is what a group's transport is doing, in the speakers' words.
@@ -51,30 +53,39 @@ func (s *System) Status(ctx context.Context, group Group) (Status, error) {
 	}
 
 	status := Status{
-		State:    State(transport["CurrentTransportState"]),
-		URI:      position["TrackURI"],
-		Position: clock(position["RelTime"]),
-		Duration: clock(position["TrackDuration"]),
+		State:    State(value(transport, "CurrentTransportState")),
+		URI:      value(position, "TrackURI"),
+		Position: clock(value(position, "RelTime")),
+		Duration: clock(value(position, "TrackDuration")),
 	}
 
-	// The track's description is a DIDL-Lite document inside the answer;
-	// a source that has none sends an empty string or NOT_IMPLEMENTED.
+	status.Title, status.Artist, status.Album = described(value(position, "TrackMetaData"))
+
+	return status, nil
+}
+
+// described reads a track's description, a DIDL-Lite document inside an
+// answer or an event: its title, artist and album. A source that has none
+// sends an empty string or NOT_IMPLEMENTED, which read as none; and a
+// speaker with nothing to play has been seen to tell, in an event, a title
+// that is a space, which is none either.
+func described(document string) (title, artist, album string) {
 	var track struct {
 		Title  string `xml:"item>title"`
 		Artist string `xml:"item>creator"`
 		Album  string `xml:"item>album"`
 	}
 
-	if xml.Unmarshal([]byte(position["TrackMetaData"]), &track) == nil {
-		status.Title, status.Artist, status.Album = track.Title, track.Artist, track.Album
+	if xml.Unmarshal([]byte(document), &track) != nil {
+		return "", "", ""
 	}
 
-	return status, nil
+	return strings.TrimSpace(track.Title), strings.TrimSpace(track.Artist), strings.TrimSpace(track.Album)
 }
 
 // Play starts the group playing what it has.
 func (s *System) Play(ctx context.Context, group Group) error {
-	_, err := s.transport(ctx, group.Coordinator, "Play", argument{"Speed", "1"})
+	_, err := s.transport(ctx, group.Coordinator, "Play", upnp.Argument{Name: "Speed", Value: "1"})
 
 	return err
 }
@@ -125,7 +136,7 @@ func (s *System) SetVolume(ctx context.Context, player Player, level int) error 
 	}
 
 	_, err := call(ctx, s.client, player.Host, renderingType, renderingPath, "SetVolume",
-		instance(), master(), argument{"DesiredVolume", strconv.Itoa(level)})
+		instance(), master(), upnp.Argument{Name: "DesiredVolume", Value: strconv.Itoa(level)})
 
 	return err
 }
@@ -138,7 +149,7 @@ func (s *System) Muted(ctx context.Context, player Player) (bool, error) {
 		return false, err
 	}
 
-	return answer["CurrentMute"] == "1", nil
+	return value(answer, "CurrentMute") == "1", nil
 }
 
 // SetMute mutes the player or not.
@@ -149,7 +160,7 @@ func (s *System) SetMute(ctx context.Context, player Player, muted bool) error {
 	}
 
 	_, err := call(ctx, s.client, player.Host, renderingType, renderingPath, "SetMute",
-		instance(), master(), argument{"DesiredMute", desired})
+		instance(), master(), upnp.Argument{Name: "DesiredMute", Value: desired})
 
 	return err
 }
@@ -181,7 +192,7 @@ func (s *System) SetGroupVolume(ctx context.Context, group Group, level int) err
 	}
 
 	_, err := call(ctx, s.client, host, groupRenderingType, groupRenderingPath, "SetGroupVolume",
-		instance(), argument{"DesiredVolume", strconv.Itoa(level)})
+		instance(), upnp.Argument{Name: "DesiredVolume", Value: strconv.Itoa(level)})
 
 	return err
 }
@@ -189,12 +200,13 @@ func (s *System) SetGroupVolume(ctx context.Context, group Group, level int) err
 // Join moves the player into the group: it plays what the group's
 // coordinator plays. The System is stale afterwards.
 func (s *System) Join(ctx context.Context, player Player, group Group) error {
-	if player.UUID == group.Coordinator.UUID {
+	if player.ID == group.Coordinator.ID {
 		return fmt.Errorf("%w: %q coordinates the group it would join", ErrArgument, player.Name)
 	}
 
 	_, err := s.transport(ctx, player, "SetAVTransportURI",
-		argument{"CurrentURI", "x-rincon:" + group.Coordinator.UUID}, argument{"CurrentURIMetaData", ""})
+		upnp.Argument{Name: "CurrentURI", Value: "x-rincon:" + string(group.Coordinator.ID)},
+		upnp.Argument{Name: "CurrentURIMetaData"})
 
 	return err
 }
@@ -212,20 +224,28 @@ func (s *System) transport(
 	ctx context.Context,
 	player Player,
 	action string,
-	args ...argument,
-) (map[string]string, error) {
+	args ...upnp.Argument,
+) (upnp.Arguments, error) {
 	return call(ctx, s.client, player.Host, transportType, transportPath, action,
-		append([]argument{instance()}, args...)...)
+		append([]upnp.Argument{instance()}, args...)...)
+}
+
+// value is one value of an answer, empty when the answer has none by that
+// name.
+func value(answer upnp.Arguments, name string) string {
+	written, _ := answer.Get(name)
+
+	return written
 }
 
 // number reads an integer out of an answer.
-func number(answer map[string]string, name string) (int, error) {
-	value, err := strconv.Atoi(answer[name])
+func number(answer upnp.Arguments, name string) (int, error) {
+	level, err := strconv.Atoi(value(answer, name))
 	if err != nil {
-		return 0, fmt.Errorf("%w: %s is %q", ErrAnswer, name, answer[name])
+		return 0, fmt.Errorf("%w: %s is %q", ErrAnswer, name, value(answer, name))
 	}
 
-	return value, nil
+	return level, nil
 }
 
 // clock reads a time as the transport writes it, hours, minutes and

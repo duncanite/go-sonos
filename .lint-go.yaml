@@ -72,10 +72,12 @@ golangci:
       depguard:
         rules:
           main:
-            # What the command is built on: the house application toolkit
-            # for its process and its transport, and the CLI framework.
-            # The library is the standard library alone.
+            # What sonos is built on: the UPnP library, for the library and
+            # the command; the house application toolkit, for the command's
+            # process and its transport; the CLI framework. Everything else
+            # stays the baseline's $gostd.
             allow:
+              - github.com/forkcloser/go-upnp
               - github.com/mycophonic/primordium
               - github.com/alecthomas/kong
       wrapcheck:
