@@ -124,6 +124,21 @@ func (w *watch) several(count int) []string {
 	return told
 }
 
+// unwatched fails when a speaker of the household still holds a
+// subscription, after what the test says.
+func unwatched(t *testing.T, house *sonostest.Household, after string) {
+	t.Helper()
+
+	for _, speaker := range house.Speakers {
+		for _, service := range []string{sonostest.Topology, sonostest.Transport, sonostest.Rendering} {
+			if held := speaker.Subscribers(service); held != 0 {
+				t.Errorf("after %s, %s holds %d subscriptions to %s: asked %q",
+					after, speaker.Name, held, service, speaker.Subscribed())
+			}
+		}
+	}
+}
+
 // ended is what the Watch returned.
 func (w *watch) ended() error {
 	w.t.Helper()
@@ -324,13 +339,7 @@ func TestWatch(t *testing.T) {
 		t.Errorf("a Watch whose context ended returns %v, want the context's error", err)
 	}
 
-	for _, speaker := range house.Speakers {
-		for _, service := range []string{sonostest.Topology, sonostest.Transport, sonostest.Rendering} {
-			if held := speaker.Subscribers(service); held != 0 {
-				t.Errorf("after the Watch %s holds %d subscriptions to %s", speaker.Name, held, service)
-			}
-		}
-	}
+	unwatched(t, house, "the Watch")
 
 	// The groups are asked of the speaker the System was opened on, a
 	// group's transport of its coordinator, a room's volume of that room.
@@ -406,7 +415,8 @@ func TestWatchHandler(t *testing.T) {
 // and its transport, which is its coordinator's from then on, is watched
 // no more; a room that leaves is told with the groups, and what it plays
 // alone is told from how it stands. A room that is gone from the household
-// is watched no more, and told from how it stands when it is back.
+// is watched no more, and told from how it stands when it is back. Groups
+// that change twice at once as the Watch ends leave no subscription.
 func TestWatchRegrouped(t *testing.T) {
 	t.Parallel()
 
@@ -505,6 +515,23 @@ func TestWatchRegrouped(t *testing.T) {
 	if got, want := following.next(), (sonos.Sounded{Player: home.porch, Volume: 35, Muted: true}); got != want {
 		t.Fatalf("a room that is back is told as %+v, want %+v", got, want)
 	}
+
+	// The groups change twice at once and the Watch ends on it: what was
+	// being given up, and what was being taken, is ended with the rest.
+	porch.Invisible = true
+
+	house.Publish()
+
+	porch.Invisible = false
+
+	house.Publish()
+	following.stop()
+
+	if err := following.ended(); !errors.Is(err, context.Canceled) {
+		t.Errorf("a Watch whose context ended returns %v, want the context's error", err)
+	}
+
+	unwatched(t, house, "the groups changed twice at once")
 }
 
 // TestWatchEnds: a Watch ends with why. An event that is not in the
@@ -567,11 +594,7 @@ func TestWatchEnds(t *testing.T) {
 			t.Errorf("after %s the Watch ends with %v, want %v", row.name, err, row.want)
 		}
 
-		for _, service := range []string{sonostest.Topology, sonostest.Transport, sonostest.Rendering} {
-			if held := house.Speakers[0].Subscribers(service); held != 0 {
-				t.Errorf("after %s the kitchen holds %d subscriptions to %s", row.name, held, service)
-			}
-		}
+		unwatched(t, house, row.name)
 	}
 
 	house := sonostest.New("Kitchen")
@@ -606,9 +629,9 @@ func TestWatchEnds(t *testing.T) {
 		t.Errorf("a Watch whose listener was closed ends with %v, want ErrClosed", err)
 	}
 
-	if held := house.Speakers[0].Subscribers(sonostest.Topology); held != 0 {
-		t.Errorf("after its listener closed the kitchen holds %d subscriptions", held)
-	}
+	// Closed on the first event, with the kitchen's other subscriptions
+	// still being taken: those are ended with the one it held.
+	unwatched(t, house, "its listener closed")
 
 	asked := len(house.Speakers[0].Subscribed())
 
@@ -638,9 +661,8 @@ func TestWatchEnds(t *testing.T) {
 
 // TestWatchUnreached: a speaker the household lists and that cannot be
 // reached ends the Watch of all, with the client's own error, which is
-// none of this package's. What the speakers that were reached hold then is
-// not asked: a subscription being taken as the Watch ends is left to its
-// speaker.
+// none of this package's. The speakers that were reached hold nothing
+// then, whatever was being taken of them as the Watch ended.
 func TestWatchUnreached(t *testing.T) {
 	t.Parallel()
 
@@ -666,6 +688,8 @@ func TestWatchUnreached(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), house.Speakers[1].Host()) {
 		t.Errorf("a Watch of a speaker that cannot be reached ends with %v, want the client's error, naming it", err)
 	}
+
+	unwatched(t, house, "a speaker could not be reached")
 }
 
 // TestListen: the listener listens where it was told and says where; an

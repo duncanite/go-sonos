@@ -82,11 +82,13 @@ func (Sounded) event()   {}
 // Nothing subscribes again by itself: watching again does, and starts from
 // how things stand.
 //
-// Every subscription a speaker confirmed is ended before Watch returns,
-// and when the speaker is watched no more. One cut short while it was
-// being taken, by groups that changed again at once or by the Watch's
-// end, is left to the speaker, which lets go of it at its next event,
-// answered as a subscription nobody holds, or when it runs out.
+// Every subscription is ended before Watch returns, and when the speaker
+// is watched no more, one that was still being taken included: Watch
+// returns once each speaker has answered. A speaker has five seconds to
+// take the end of a subscription, and as long again when it had not yet
+// said which one it granted; one that does not answer keeps it until its
+// next event, answered as a subscription nobody holds, or until it runs
+// out.
 func (s *System) Watch(ctx context.Context, events *Events, callback string, handle func(Event)) error {
 	if events == nil || handle == nil {
 		return fmt.Errorf("%w: a Watch needs a listener and a handler", ErrArgument)

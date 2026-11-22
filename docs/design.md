@@ -127,11 +127,12 @@ The library reads no file, writes no log, and opens no socket to find a speaker.
   no more and starts those it lacks. It ends with why and subscribes again to nothing by
   itself: a speaker that vanishes ends it with `ErrLost`, for all the household, and
   watching again starts from how things stand, and ends at once, with the client's error
-  for a speaker it cannot reach, for as long as the household lists that speaker. A
-  subscription it gives up while the speaker is still granting it, when the groups change
-  twice at once, is not ended by it: the speaker drops it at its next event, which nobody
-  takes, or when it runs out. The cause is go-upnp's:
-  [a subscription cut short while it is being taken is never ended](https://github.com/forkcloser/go-upnp/issues/7).
+  for a speaker it cannot reach, for as long as the household lists that speaker. It ends
+  every subscription before it returns, one the speaker was still granting included, when
+  the groups change twice at once or the `Watch` ends: go-upnp sees the asking through,
+  then ends what was granted. So `Watch` returns once each speaker has answered, or has
+  had its five seconds to, twice over when it had not yet said which subscription it
+  granted.
 - **An event's variables are never handed on as they came.** The topology's events carry
   more than the groups; SoCo redacts one of them, `ThirdPartyMediaServersX`, as holding
   account tokens. `Watch` reads the groups, the transport state and track, the volume and
