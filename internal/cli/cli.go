@@ -1,6 +1,7 @@
-// Package cli is the sonos command: the rooms of a household and what
-// they play, play and pause, volume, and moving a room in and out of a
-// group, all asked of the speakers themselves on the LAN.
+// Package cli is the sonos command: the speakers on this network, the
+// rooms of a household and what they play, play and pause, volume, moving
+// a room in and out of a group, and what the household does as it happens,
+// all asked of the speakers themselves on the LAN.
 package cli
 
 import (
@@ -8,14 +9,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/forkcloser/go-upnp/ssdp"
 
+	"github.com/duncanite/go-sonos/internal/terminal"
 	"github.com/duncanite/go-sonos/sonos"
 )
 
@@ -26,7 +29,8 @@ const (
 )
 
 // EnvHost is the environment variable the address of a speaker is read
-// from when --host is not given.
+// from when --host is not given; with neither, the speakers are searched
+// for.
 const EnvHost = "SONOS_HOST"
 
 // exitStatus is how the parser's own exit, on --help, leaves Run: kong
@@ -35,7 +39,13 @@ const EnvHost = "SONOS_HOST"
 type exitStatus int
 
 type rootCommand struct {
-	Host string `env:"SONOS_HOST" help:"The address of any one speaker of the household; it names the others." required:"true"`
+	Host      string        `env:"SONOS_HOST"      help:"The address of any one speaker of the household; it names the others. Without it, the speakers are searched for, and the first that answers is asked."`
+	Interface string        `env:"SONOS_INTERFACE" help:"The network interface the speakers are on, when the host has several."`
+	Wait      time.Duration `default:"3s"          env:"SONOS_WAIT"                                                                                                                                             help:"How long a search collects answers."`
+
+	Discover  discoverCommand  `cmd:"" help:"Find every speaker on this network."`
+	Household householdCommand `cmd:"" help:"Print the household's identity."`
+	Watch     watchCommand     `cmd:"" help:"Print what the household does as it happens, until interrupted."`
 
 	Rooms    roomsCommand    `cmd:"" help:"List the rooms: who plays with whom, what, and how loud."`
 	Status   statusCommand   `cmd:"" help:"Print what a room is playing."`
@@ -50,8 +60,28 @@ type rootCommand struct {
 	Join     joinCommand     `cmd:"" help:"Move a room into another room's group."`
 	Leave    leaveCommand    `cmd:"" help:"Take a room out of its group, to play alone."`
 
-	out    io.Writer
+	out     io.Writer
+	client  sonos.Doer
+	network ssdp.Network
+
+	// system is the household, once a command asked for it, and local
+	// this host's address on its network when a search said.
 	system *sonos.System
+	local  netip.Addr
+}
+
+// Environment is where the command runs.
+type Environment struct {
+	// Args is its arguments, without its name.
+	Args []string
+	// Out and Err are where it writes.
+	Out io.Writer
+	Err io.Writer
+	// Client makes every request to the speakers. It has to follow no
+	// redirect.
+	Client sonos.Doer
+	// Network is where speakers are searched for; nil is the host's own.
+	Network ssdp.Network
 }
 
 type room struct {
@@ -59,6 +89,12 @@ type room struct {
 }
 
 type (
+	discoverCommand  struct{}
+	householdCommand struct{}
+	watchCommand     struct {
+		Callback   string        `help:"host:port to listen at, which the speakers notify; empty picks this host's address on the speakers' network and a free port."`
+		FirstEvent time.Duration `default:"10s"                                                                                                                       help:"How long the speakers get to send a first event, how the household stands, before the callback is judged unreachable."`
+	}
 	roomsCommand    struct{}
 	statusCommand   struct{ room }
 	playCommand     struct{ room }
@@ -82,9 +118,8 @@ type (
 	}
 )
 
-// Run parses args and runs the command. client makes every request to the
-// speakers.
-func Run(ctx context.Context, args []string, stdout, stderr io.Writer, client *http.Client) (status int) {
+// Run parses the arguments and runs the command.
+func Run(ctx context.Context, env Environment) (status int) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			exited, ok := recovered.(exitStatus)
@@ -96,39 +131,36 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, client *h
 		}
 	}()
 
-	root := rootCommand{out: stdout}
+	root := rootCommand{out: env.Out, client: env.Client, network: env.Network}
 
 	parser, err := kong.New(&root,
 		kong.Name("sonos"),
 		kong.Description("Control the Sonos speakers of a household on the LAN. One speaker's address, in --host or "+
-			EnvHost+", is enough: it names the others."),
+			EnvHost+", is enough: it names the others. With none, the speakers are searched for."),
 		kong.UsageOnError(),
-		kong.Writers(stdout, stderr),
+		kong.Writers(env.Out, env.Err),
 		kong.Exit(func(code int) { panic(exitStatus(code)) }),
 		kong.BindTo(ctx, (*context.Context)(nil)),
 	)
 	if err != nil {
-		fmt.Fprintln(stderr, "sonos:", err)
+		fmt.Fprintln(env.Err, "sonos:", err)
 
 		return ExitError
 	}
 
-	kctx, err := parser.Parse(args)
+	kctx, err := parser.Parse(env.Args)
 	if err != nil {
 		parser.Errorf("%s", err)
 
 		return ExitError
 	}
 
-	if root.system, err = sonos.Discover(ctx, client, root.Host); err == nil {
-		err = kctx.Run(&root)
-	}
-
-	if err != nil {
-		fmt.Fprintln(stderr, "sonos:", err)
+	if err = kctx.Run(&root); err != nil {
+		// An error may carry a speaker's words: what it said in refusing.
+		fmt.Fprintln(env.Err, "sonos:", terminal.Text(err.Error()))
 
 		if errors.Is(err, sonos.ErrForbidden) {
-			fmt.Fprintln(stderr, "sonos: a speaker answers so with its UPnP setting off: "+
+			fmt.Fprintln(env.Err, "sonos: a speaker answers so with its UPnP setting off: "+
 				"in the Sonos app, Account, Privacy and Security, UPnP")
 		}
 
@@ -139,23 +171,28 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer, client *h
 }
 
 func (*roomsCommand) Run(ctx context.Context, root *rootCommand) error {
+	system, err := root.household(ctx)
+	if err != nil {
+		return err
+	}
+
 	table := tabwriter.NewWriter(root.out, 0, 0, 2, ' ', 0)
 
 	fmt.Fprintln(table, "ROOM\tWITH\tSTATE\tVOLUME\tMUTED\tPLAYING\tADDRESS")
 
-	for _, group := range root.system.Groups {
-		status, err := root.system.Status(ctx, group)
+	for _, group := range system.Groups {
+		status, err := system.Status(ctx, group)
 		if err != nil {
 			return err
 		}
 
 		for _, member := range group.Members {
-			level, err := root.system.Volume(ctx, member)
+			level, err := system.Volume(ctx, member)
 			if err != nil {
 				return err
 			}
 
-			muted, err := root.system.Muted(ctx, member)
+			muted, err := system.Muted(ctx, member)
 			if err != nil {
 				return err
 			}
@@ -179,7 +216,7 @@ func others(group sonos.Group, member sonos.Player) string {
 	var names []string
 
 	for _, other := range group.Members {
-		if other.UUID != member.UUID {
+		if other.ID != member.ID {
 			names = append(names, strconv.Quote(other.Name))
 		}
 	}
@@ -188,12 +225,17 @@ func others(group sonos.Group, member sonos.Player) string {
 }
 
 func (cmd *statusCommand) Run(ctx context.Context, root *rootCommand) error {
-	_, group, err := root.system.Room(cmd.Room)
+	system, err := root.household(ctx)
 	if err != nil {
 		return err
 	}
 
-	status, err := root.system.Status(ctx, group)
+	_, group, err := system.Room(cmd.Room)
+	if err != nil {
+		return err
+	}
+
+	status, err := system.Status(ctx, group)
 	if err != nil {
 		return err
 	}
@@ -230,55 +272,65 @@ func (cmd *statusCommand) Run(ctx context.Context, root *rootCommand) error {
 func (root *rootCommand) transport(
 	ctx context.Context,
 	name string,
-	action func(context.Context, sonos.Group) error,
+	action func(*sonos.System, context.Context, sonos.Group) error,
 ) error {
-	_, group, err := root.system.Room(name)
+	system, err := root.household(ctx)
 	if err != nil {
 		return err
 	}
 
-	return action(ctx, group)
+	_, group, err := system.Room(name)
+	if err != nil {
+		return err
+	}
+
+	return action(system, ctx, group)
 }
 
 func (cmd *playCommand) Run(ctx context.Context, root *rootCommand) error {
-	return root.transport(ctx, cmd.Room, root.system.Play)
+	return root.transport(ctx, cmd.Room, (*sonos.System).Play)
 }
 
 func (cmd *pauseCommand) Run(ctx context.Context, root *rootCommand) error {
-	return root.transport(ctx, cmd.Room, root.system.Pause)
+	return root.transport(ctx, cmd.Room, (*sonos.System).Pause)
 }
 
 func (cmd *stopCommand) Run(ctx context.Context, root *rootCommand) error {
-	return root.transport(ctx, cmd.Room, root.system.Stop)
+	return root.transport(ctx, cmd.Room, (*sonos.System).Stop)
 }
 
 func (cmd *nextCommand) Run(ctx context.Context, root *rootCommand) error {
-	return root.transport(ctx, cmd.Room, root.system.Next)
+	return root.transport(ctx, cmd.Room, (*sonos.System).Next)
 }
 
 func (cmd *previousCommand) Run(ctx context.Context, root *rootCommand) error {
-	return root.transport(ctx, cmd.Room, root.system.Previous)
+	return root.transport(ctx, cmd.Room, (*sonos.System).Previous)
 }
 
 func (cmd *volumeCommand) Run(ctx context.Context, root *rootCommand) error {
-	player, group, err := root.system.Room(cmd.Room)
+	system, err := root.household(ctx)
+	if err != nil {
+		return err
+	}
+
+	player, group, err := system.Room(cmd.Room)
 	if err != nil {
 		return err
 	}
 
 	switch {
 	case cmd.Level != nil && cmd.Group:
-		return root.system.SetGroupVolume(ctx, group, *cmd.Level)
+		return system.SetGroupVolume(ctx, group, *cmd.Level)
 	case cmd.Level != nil:
-		return root.system.SetVolume(ctx, player, *cmd.Level)
+		return system.SetVolume(ctx, player, *cmd.Level)
 	}
 
 	var level int
 
 	if cmd.Group {
-		level, err = root.system.GroupVolume(ctx, group)
+		level, err = system.GroupVolume(ctx, group)
 	} else {
-		level, err = root.system.Volume(ctx, player)
+		level, err = system.Volume(ctx, player)
 	}
 
 	if err != nil {
@@ -299,35 +351,66 @@ func (cmd *unmuteCommand) Run(ctx context.Context, root *rootCommand) error {
 }
 
 func (root *rootCommand) mute(ctx context.Context, name string, muted bool) error {
-	player, _, err := root.system.Room(name)
+	system, err := root.household(ctx)
 	if err != nil {
 		return err
 	}
 
-	return root.system.SetMute(ctx, player, muted)
+	player, _, err := system.Room(name)
+	if err != nil {
+		return err
+	}
+
+	return system.SetMute(ctx, player, muted)
 }
 
 func (cmd *joinCommand) Run(ctx context.Context, root *rootCommand) error {
-	player, _, err := root.system.Room(cmd.Room)
+	system, err := root.household(ctx)
 	if err != nil {
 		return err
 	}
 
-	_, group, err := root.system.Room(cmd.With)
+	player, _, err := system.Room(cmd.Room)
 	if err != nil {
 		return err
 	}
 
-	return root.system.Join(ctx, player, group)
+	_, group, err := system.Room(cmd.With)
+	if err != nil {
+		return err
+	}
+
+	return system.Join(ctx, player, group)
 }
 
 func (cmd *leaveCommand) Run(ctx context.Context, root *rootCommand) error {
-	player, _, err := root.system.Room(cmd.Room)
+	system, err := root.household(ctx)
 	if err != nil {
 		return err
 	}
 
-	return root.system.Leave(ctx, player)
+	player, _, err := system.Room(cmd.Room)
+	if err != nil {
+		return err
+	}
+
+	return system.Leave(ctx, player)
+}
+
+func (*householdCommand) Run(ctx context.Context, root *rootCommand) error {
+	system, err := root.household(ctx)
+	if err != nil {
+		return err
+	}
+
+	household, err := system.Household(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintf(root.out, "%q\n", household)
+
+	return nil
 }
 
 // said is a transport state as a person says it; one the documentation

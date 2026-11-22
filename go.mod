@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/alecthomas/kong v1.17.0
+	github.com/forkcloser/go-upnp v0.0.0-20261117090125-a45d29e25e16
 	github.com/mycophonic/primordium v0.15.1
 )
 

@@ -5,7 +5,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 )
@@ -22,8 +21,8 @@ var (
 // Player is one speaker a person sees: a room. The second speaker of a
 // stereo pair, a surround, a sub or a bridge is not one.
 type Player struct {
-	// UUID is the speaker's permanent id, "RINCON_...".
-	UUID string
+	// ID is who the speaker is, the same wherever it is.
+	ID ID
 	// Name is the room's name.
 	Name string
 	// Host is the speaker's address, with its port.
@@ -40,11 +39,14 @@ type Group struct {
 	Members []Player
 }
 
-// System is a household as one speaker described it at one moment. It
-// does not follow changes: after a Join or a Leave, or when a speaker has
-// been regrouped elsewhere, Discover again.
+// System is a household as one speaker described it at one moment. Its
+// Groups do not follow changes: after a Join or a Leave, or when a speaker
+// has been regrouped elsewhere, Open again, or Watch, which tells the
+// groups each time they change.
 type System struct {
-	client *http.Client
+	client Doer
+	// seed is the speaker the household was read from, host and port.
+	seed string
 	// Groups is every group that has a room in it.
 	Groups []Group
 }
@@ -70,11 +72,16 @@ type (
 	}
 )
 
-// Discover asks the speaker at seed, a host with or without a port, for
-// the household: any speaker knows all of it. client makes every request,
+// Open asks one speaker for the household: any speaker knows all of it.
+// target names that speaker: the URL of its description, as a Found gives
+// it, or its host, with or without a port. client makes every request,
 // then and later.
-func Discover(ctx context.Context, client *http.Client, seed string) (*System, error) {
-	host, err := address(seed)
+func Open(ctx context.Context, client Doer, target string) (*System, error) {
+	if client == nil {
+		return nil, fmt.Errorf("%w: no client", ErrArgument)
+	}
+
+	host, err := address(target)
 	if err != nil {
 		return nil, err
 	}
@@ -84,12 +91,43 @@ func Discover(ctx context.Context, client *http.Client, seed string) (*System, e
 		return nil, err
 	}
 
+	state, _ := answer.Get("ZoneGroupState")
+
+	groups, err := topology(state)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", host, err)
+	}
+
+	return &System{client: client, seed: host, Groups: groups}, nil
+}
+
+// Household is the identity of the household, "Sonos_...", as the speaker
+// the System was opened on gives it: the same from every speaker of one
+// household, and what tells a speaker of another household on the same
+// network apart.
+func (s *System) Household(ctx context.Context) (string, error) {
+	answer, err := call(ctx, s.client, s.seed, propertiesType, propertiesPath, "GetHouseholdID")
+	if err != nil {
+		return "", err
+	}
+
+	household, _ := answer.Get("CurrentHouseholdID")
+	if household == "" {
+		return "", fmt.Errorf("%w: %s names no household", ErrAnswer, s.seed)
+	}
+
+	return household, nil
+}
+
+// topology reads a zone group state, the document an answer or an event
+// carries: every group that has a room in it.
+func topology(written string) ([]Group, error) {
 	var state zoneGroupState
-	if err = xml.Unmarshal([]byte(answer["ZoneGroupState"]), &state); err != nil {
+	if err := xml.Unmarshal([]byte(written), &state); err != nil {
 		return nil, fmt.Errorf("%w: the zone group state: %w", ErrAnswer, err)
 	}
 
-	system := &System{client: client}
+	var groups []Group
 
 	for _, zone := range append(state.Wrapped, state.Bare...) {
 		group, err := grouped(zone)
@@ -99,11 +137,11 @@ func Discover(ctx context.Context, client *http.Client, seed string) (*System, e
 
 		// A bridge or a sub alone: nothing a person plays to.
 		if len(group.Members) > 0 {
-			system.Groups = append(system.Groups, group)
+			groups = append(groups, group)
 		}
 	}
 
-	return system, nil
+	return groups, nil
 }
 
 // grouped is one group of the zone group state: its rooms, and its
@@ -117,7 +155,7 @@ func grouped(zone zoneGroup) (Group, error) {
 			return Group{}, fmt.Errorf("%w: the location %q of %s", ErrAnswer, member.Location, member.UUID)
 		}
 
-		player := Player{UUID: member.UUID, Name: member.ZoneName, Host: location.Host}
+		player := Player{ID: ID(member.UUID), Name: member.ZoneName, Host: location.Host}
 
 		if member.UUID == zone.Coordinator {
 			group.Coordinator = player
@@ -128,7 +166,7 @@ func grouped(zone zoneGroup) (Group, error) {
 		}
 	}
 
-	if len(group.Members) > 0 && group.Coordinator.UUID == "" {
+	if len(group.Members) > 0 && group.Coordinator.ID == "" {
 		return Group{}, fmt.Errorf("%w: the group %s names no coordinator among its members", ErrAnswer, zone.ID)
 	}
 

@@ -2,10 +2,17 @@ package cli_test
 
 import (
 	"bytes"
+	"errors"
+	"net/http"
+	"net/netip"
 	"strings"
 	"testing"
 
+	"github.com/forkcloser/go-upnp/ssdp"
+	"github.com/forkcloser/go-upnp/ssdp/ssdptest"
+
 	"github.com/duncanite/go-sonos/internal/cli"
+	"github.com/duncanite/go-sonos/sonos"
 	"github.com/duncanite/go-sonos/sonos/sonostest"
 )
 
@@ -38,12 +45,57 @@ func household(t *testing.T) *sonostest.Household {
 func run(t *testing.T, house *sonostest.Household, args ...string) (out, errs string, status int) {
 	t.Helper()
 
+	return runOn(t, ssdptest.NewHost(), append([]string{"--host", house.Speakers[0].Host()}, args...)...)
+}
+
+// runOn is the command on a network, with no speaker named unless the
+// arguments name one.
+func runOn(t *testing.T, network ssdp.Network, args ...string) (out, errs string, status int) {
+	t.Helper()
+
 	var stdout, stderr bytes.Buffer
 
-	args = append([]string{"--host", house.Speakers[0].Host()}, args...)
-	status = cli.Run(t.Context(), args, &stdout, &stderr, house.Speakers[0].Client())
+	status = cli.Run(t.Context(), cli.Environment{
+		Args: args, Out: &stdout, Err: &stderr, Client: local{}, Network: network,
+	})
 
 	return stdout.String(), stderr.String(), status
+}
+
+// errNobody is what local returns for a host that is not this one.
+var errNobody = errors.New("nobody answers there")
+
+// local is a client that reaches the loopback, where the speakers of
+// these tests are, and no other host: a test that wants a host nobody
+// answers on names one that is not there, and asks nothing of the ports
+// of the host it runs on.
+type local struct{}
+
+func (local) Do(request *http.Request) (*http.Response, error) {
+	if request.URL.Hostname() != "127.0.0.1" {
+		return nil, errNobody
+	}
+
+	return http.DefaultClient.Do(request)
+}
+
+// advertised is a network the speakers are advertised on, each at the
+// loopback address its server listens at, and this host on it. A network
+// serves one run of the command.
+func advertised(speakers ...*sonostest.Speaker) *ssdptest.Host {
+	lan, host := ssdptest.NewLAN(), ssdptest.NewHost()
+
+	host.Plug(lan, "lo0", 1, netip.MustParsePrefix("127.0.0.1/8"))
+
+	for _, speaker := range speakers {
+		lan.Device(netip.MustParseAddr("127.0.0.1"), ssdptest.Advert{
+			USN:      "uuid:" + speaker.UUID + "::" + sonos.SearchTarget,
+			Type:     sonos.SearchTarget,
+			Location: speaker.URL + "/xml/device_description.xml",
+		})
+	}
+
+	return host
 }
 
 // rows is the output as lines of fields, the spacing of a table aside.
@@ -86,6 +138,7 @@ func TestReading(t *testing.T) {
 		{[]string{"status", "Kitchen"}, []string{"state: stopped"}},
 		{[]string{"volume", "Porch"}, []string{"35"}},
 		{[]string{"volume", "Porch", "--group"}, []string{"27"}},
+		{[]string{"household"}, []string{`"` + house.ID + `"`}},
 	} {
 		out, errs, status := run(t, house, step.args...)
 		if got := rows(
@@ -171,11 +224,14 @@ func TestRefusing(t *testing.T) {
 		}
 	}
 
-	var out, errs bytes.Buffer
+	if _, said, status := runOn(t, ssdptest.NewHost(), "--wait", "50ms", "rooms"); status != cli.ExitError ||
+		!strings.Contains(said, "no speaker answered the search within 50ms; name one with --host") {
+		t.Errorf("with no speaker named and none on the network, the command exits %d saying %q", status, said)
+	}
 
-	if status := cli.Run(t.Context(), []string{"rooms"}, &out, &errs, porch.Client()); status != cli.ExitError ||
-		!strings.Contains(errs.String(), "--host") {
-		t.Errorf("with no speaker named, the command exits %d saying %q", status, errs.String())
+	if _, said, status := runOn(t, ssdptest.NewHost(), "--host", "192.0.2.1", "rooms"); status != cli.ExitError ||
+		!strings.Contains(said, "192.0.2.1:1400") || !strings.Contains(said, "nobody answers there") {
+		t.Errorf("with a speaker that is not there, the command exits %d saying %q", status, said)
 	}
 
 	house.Forbid = true
@@ -186,10 +242,8 @@ func TestRefusing(t *testing.T) {
 		t.Errorf("with UPnP off, rooms exits %d saying %q", status, said)
 	}
 
-	out.Reset()
-
-	if status = cli.Run(t.Context(), []string{"--help"}, &out, &errs, porch.Client()); status != cli.ExitOK ||
-		!strings.Contains(out.String(), cli.EnvHost) {
-		t.Errorf("--help exits %d saying %q", status, out.String())
+	if out, _, status := runOn(t, ssdptest.NewHost(), "--help"); status != cli.ExitOK ||
+		!strings.Contains(out, cli.EnvHost) {
+		t.Errorf("--help exits %d saying %q", status, out)
 	}
 }

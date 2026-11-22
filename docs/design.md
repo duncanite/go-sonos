@@ -1,8 +1,8 @@
 # go-sonos: the design
 
 Research into controlling Sonos speakers, done on 2026-11-15 from public sources, and the
-module built from it. The module follows what was read; nothing here was run against a
-speaker.
+module built from it. The module follows what was read; what was since run against
+speakers is under [Observed on speakers](#observed-on-speakers).
 
 In short: Sonos speakers are controlled entirely on the LAN, over UPnP: SOAP calls to
 each speaker on port 1400. It covers playback, volume, grouping, favourites, the queue,
@@ -72,19 +72,41 @@ from Sonos was found.
 **A client of the UPnP API**, of the three ways in: it is local, needs no account, and
 covers everything the others do.
 
-- `sonos`: `Discover` asks one speaker for the household and gives a `System`, its groups
+- `sonos`: `Open` asks one speaker for the household and gives a `System`, its groups
   with their coordinators and rooms. On it: `Status`, `Play`, `Pause`, `Stop`, `Next`,
   `Previous` for a group; `Volume`, `SetVolume`, `Muted`, `SetMute` for a room;
-  `GroupVolume` and `SetGroupVolume`; `Join` and `Leave`. The standard library alone.
+  `GroupVolume` and `SetGroupVolume`; `Join` and `Leave`; `Household`, its identity;
+  `Watch`, everything above told as it changes. `Recognize` and `Find` say what a speaker
+  is on the network. Built on [go-upnp](https://github.com/forkcloser/go-upnp) for the
+  actions and the subscriptions, and on the standard library.
 - `sonos/sonostest`: a household for tests, one HTTP server per speaker, that refuses a
-  request not shaped as the documentation gives it.
-- `cmd/sonos`: the command, over `internal/cli`.
+  request not shaped as the documentation gives it, and sends events.
+- `cmd/sonos`: the command, over `internal/cli`. It is where the sockets are: the SSDP
+  search, through go-upnp's `ssdp`, and the choice of where the events listener listens.
+
+### What the library opens, and what it is lent
+
+The library reads no file, writes no log, and opens no socket to find a speaker.
+
+- **Requests** go through the caller's client, a `Doer`: an `*http.Client` is one.
+- **Finding** goes through a `Browser` the caller lends, an interface of this package's
+  own in standard types: SSDP's port is one to a host, and belongs to the program. `Find`
+  is that browser's search for `SearchTarget` narrowed to what `Recognize` takes, and
+  `Recognize` works on a value, for a caller that holds advertisements already.
+- **Events** arrive at a listener the library does open, `Listen`, at the address the
+  caller gives; each `Watch` is told the URL the speakers reach it at. Neither address is
+  guessed: only the caller knows which of the host's addresses the speakers can reach.
 
 ### Decisions
 
-- **The household comes from one speaker's address.** Any speaker gives the whole
-  topology, so one address is enough, and a search by multicast does not pass every
-  network. The search is not built.
+- **The household comes from one speaker.** Any speaker gives the whole topology, so one
+  is enough: one named by its address, since a search by multicast does not pass every
+  network, or the first a search finds.
+- **A speaker is who the household says it is.** Its `ID` is the id the zone group state
+  gives it, `RINCON_...`, which is its UDN without `uuid:`: what an advertisement names
+  it by is what the household names it by. An advertisement proves nothing, and a network
+  may carry two households: `Household` asks a speaker which one it is of, with
+  `GetHouseholdID` of the device properties service.
 - **The services' types and control URLs are constants**, as the documentation gives
   them, and not read from each speaker's device description: one request per action, and
   the documentation gives the same paths for every speaker.
@@ -95,8 +117,35 @@ covers everything the others do.
   has a speaker that does not coordinate answer PLAYING whatever its group does, so
   nothing about playback is asked of one. A group's volume is set after a snapshot,
   which is what the speakers scale each room from.
-- **A `System` is the household at one moment.** It follows no change; after a `Join` or
-  a `Leave` it is read again.
+- **A `System` is the household at one moment.** Its groups follow no change; after a
+  `Join` or a `Leave` it is read again, or watched.
+- **`Watch` follows the household, not a speaker.** It subscribes to the topology on the
+  speaker the `System` was opened on, to the transport of each group's coordinator and to
+  the rendering control of each room, and tells the groups (`Regrouped`), what a group
+  plays (`Played`) and how loud a room is (`Sounded`): first how each stands, then each
+  change, whole. When the groups change it ends the subscriptions to speakers it follows
+  no more and starts those it lacks. It ends with why and subscribes again to nothing by
+  itself: a speaker that vanishes ends it with `ErrLost`, for all the household, and
+  watching again starts from how things stand, and ends at once, with the client's error
+  for a speaker it cannot reach, for as long as the household lists that speaker. A
+  subscription it gives up while the speaker is still granting it, when the groups change
+  twice at once, is not ended by it: the speaker drops it at its next event, which nobody
+  takes, or when it runs out. The cause is go-upnp's:
+  [a subscription cut short while it is being taken is never ended](https://github.com/forkcloser/go-upnp/issues/7).
+- **An event's variables are never handed on as they came.** The topology's events carry
+  more than the groups; SoCo redacts one of them, `ThirdPartyMediaServersX`, as holding
+  account tokens. `Watch` reads the groups, the transport state and track, the volume and
+  the mute, and gives those.
+- **A transport or rendering event is a `LastChange` document**, as SoCo reads it: under
+  an `InstanceID` element, one element per variable that changed, its value in `val`, or
+  in the element's text when `val` is absent; a volume and a mute come once per channel,
+  and `Master` is the speaker's. A change carries only what changed, so `Watch` keeps
+  what each speaker said and tells the whole. A speaker's events say nothing of the
+  position in a track; `Status` asks.
+- **What a speaker wrote is quoted on the terminal.** A room's name and a track's title
+  are printed quoted, and what a speaker says in refusing an action is written with its
+  control and direction characters escaped: a name with a line's end in it forges no line
+  of the command's output.
 - **What a speaker refuses is told apart**: a UPnP fault with its code, a 403, and an
   answer that is not the documented SOAP. The 403 is what Home Assistant's page gives for
   the UPnP setting turned off: "403 Client Error: Forbidden", "This error means UPnP is
@@ -105,10 +154,8 @@ covers everything the others do.
 
 ### Not built
 
-Events, so nothing follows a change as it happens. Favourites, the queue, the inputs and
-alarms. Discovery by SSDP. The SOAP caller is this module's own and does what these
-actions need; go-wemo holds a fuller UPnP stack, with service descriptions and events,
-for another device.
+Favourites, the queue, the inputs and alarms. A `Watch` that survives a lost subscription
+by itself. A speaker's own description is not read: nothing here needs it.
 
 [sonoscli](https://github.com/steipete/sonoscli) is a Go command that does all of this,
 active, with its code not importable; it is a reference. The Go libraries found are
@@ -121,13 +168,37 @@ unmaintained.
 - Whether the speakers and the machine that runs the command share a network, with
   multicast passing; without it, one speaker's address is enough.
 
+## Observed on speakers
+
+The command, run on 2026-11-21 against two speakers on Sonos software 98.0, each a room
+playing alone, from a host on their network:
+
+- Both answered the search for `urn:schemas-upnp-org:device:ZonePlayer:1`, and the id each
+  advertised is the id the zone group state gives it: `discover` named each one's room.
+- `GetZoneGroupState`, `GetTransportInfo`, `GetPositionInfo`, `GetVolume` and `GetMute`
+  answered at the documented paths, and read as documented.
+- `play` and `pause`, sent by the command, started and paused a room.
+- Each took the subscriptions `watch` makes, to the topology on one and to the transport
+  and the rendering control on both, and called back a listener on their own network. The
+  first events carried the groups, each room's volume and mute, and each group's state and
+  track. Playback started from the Sonos app, then a volume changed there, were each told and
+  read.
+- A speaker with nothing to play told a track whose title is a space, in its event, where
+  `GetPositionInfo` gives none; `described` reads both as no title.
+
 ## Not verified
 
-- Nothing above was observed on a speaker, and the module was run against its own
-  stand-in only.
+- Of the actions that change something, only `Play` and `Pause` were sent to a speaker by
+  this module: not `Stop`, `Next`, `Previous`, `SetVolume`, `SetMute`, `SetGroupVolume`,
+  `Join`, `Leave`. Nor was `GetHouseholdID` asked of one, nor a `Watch` run through a
+  regrouping.
 - What a speaker answers a transport action when it does not coordinate its group.
 - Whether every model serves the services at the documented paths.
-- The event subscription's details were not read in a primary source.
+- The shape of a `LastChange` document was read in SoCo's reader of it, not in a
+  speaker's own word.
+- Whether a speaker asked from another network than its own takes a subscription.
+- What a speaker's first event carries: the module tells what it has been told, and a
+  first event without a volume would be told with a volume of 0.
 - Which software versions carry the UPnP setting: the page names none.
 - What the port 1443 interface covers beyond what its open clients use.
 
@@ -143,6 +214,13 @@ unmaintained.
 - Sonos developer documentation: [control](https://docs.sonos.com/docs/control),
   [authorize](https://docs.sonos.com/docs/authorize).
 - [sonoscli](https://github.com/steipete/sonoscli): a Go command on the UPnP API.
-- [SoCo](https://github.com/SoCo/SoCo): the long-standing Python library on it.
+- [SoCo](https://github.com/SoCo/SoCo): the long-standing Python library on it; its
+  [reader of events](https://github.com/SoCo/SoCo/blob/0bcdf2d5a2c78dbb1acd1e433717e4416afe165f/soco/events_base.py) for
+  the `LastChange` document and the variable it redacts.
+- The services' pages for what each tells and where:
+  [AVTransport](https://sonos.svrooij.io/services/av-transport),
+  [RenderingControl](https://sonos.svrooij.io/services/rendering-control),
+  [ZoneGroupTopology](https://sonos.svrooij.io/services/zone-group-topology),
+  [DeviceProperties](https://sonos.svrooij.io/services/device-properties).
 - [sonos-websocket](https://github.com/jjlawren/sonos-websocket): the port 1443
   interface in use.
