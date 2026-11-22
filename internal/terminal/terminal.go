@@ -1,11 +1,15 @@
-// Package terminal writes text a device chose so that a terminal shows it
-// and obeys none of it. What a speaker says in refusing an action is
-// whatever the speaker, or whoever answers for it, wrote: a line's end in
-// it forges a line of the program's output, and a control or a direction
-// mark moves, hides or reorders what is on the screen.
+// Package terminal prints text a device chose so that a terminal shows it
+// and obeys none of it. A room's name, a track's title, what a speaker
+// says in refusing an action are whatever the speaker, or whoever answers
+// for it, wrote: a line's end in one forges a line of the program's
+// output, and a control or a direction mark moves, hides or reorders what
+// is on the screen.
 package terminal
 
 import (
+	"fmt"
+	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"unicode"
@@ -20,7 +24,7 @@ func Text(text string) string {
 	plain := true
 
 	for _, char := range text {
-		if !unicode.IsPrint(char) {
+		if !shown(char) {
 			plain = false
 
 			break
@@ -39,7 +43,7 @@ func Text(text string) string {
 		switch {
 		case char == utf8.RuneError && size == 1:
 			out.WriteString(`\x` + strconv.FormatUint(uint64(text[index]), 16))
-		case unicode.IsPrint(char):
+		case shown(char):
 			out.WriteRune(char)
 		default:
 			quoted := strconv.QuoteRune(char)
@@ -50,4 +54,48 @@ func Text(text string) string {
 	}
 
 	return out.String()
+}
+
+// shown says a character is one a terminal draws and does nothing else
+// with.
+func shown(char rune) bool {
+	return unicode.IsPrint(char)
+}
+
+// Printf formats as fmt.Fprintf does, with every argument but a number
+// and a truth value printed first, as fmt prints it by default, and passed
+// through Text: the format is the program's own, and its arguments may be
+// a device's, alone or inside a list, a map or a structure. A number that
+// prints as text, a duration, is text too.
+func Printf(out io.Writer, format string, args ...any) {
+	safe := make([]any, 0, len(args))
+
+	for _, arg := range args {
+		if plain(arg) {
+			safe = append(safe, arg)
+		} else {
+			safe = append(safe, Text(fmt.Sprint(arg)))
+		}
+	}
+
+	fmt.Fprintf(out, format, safe...)
+}
+
+// plain says an argument is a number or a truth value and nothing that
+// prints as text: what no device's text is in.
+func plain(arg any) bool {
+	switch arg.(type) {
+	case error, fmt.Stringer:
+		return false
+	}
+
+	switch reflect.ValueOf(arg).Kind() { //nolint:exhaustive // every other kind may hold text
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return true
+	default:
+		return false
+	}
 }

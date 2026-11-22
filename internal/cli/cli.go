@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -143,7 +142,7 @@ func Run(ctx context.Context, env Environment) (status int) {
 		kong.BindTo(ctx, (*context.Context)(nil)),
 	)
 	if err != nil {
-		fmt.Fprintln(env.Err, "sonos:", err)
+		terminal.Printf(env.Err, "sonos: %s\n", err)
 
 		return ExitError
 	}
@@ -157,11 +156,11 @@ func Run(ctx context.Context, env Environment) (status int) {
 
 	if err = kctx.Run(&root); err != nil {
 		// An error may carry a speaker's words: what it said in refusing.
-		fmt.Fprintln(env.Err, "sonos:", terminal.Text(err.Error()))
+		terminal.Printf(env.Err, "sonos: %s\n", err)
 
 		if errors.Is(err, sonos.ErrForbidden) {
-			fmt.Fprintln(env.Err, "sonos: a speaker answers so with its UPnP setting off: "+
-				"in the Sonos app, Account, Privacy and Security, UPnP")
+			terminal.Printf(env.Err, "sonos: a speaker answers so with its UPnP setting off: "+
+				"in the Sonos app, Account, Privacy and Security, UPnP\n")
 		}
 
 		return ExitError
@@ -178,7 +177,7 @@ func (*roomsCommand) Run(ctx context.Context, root *rootCommand) error {
 
 	table := tabwriter.NewWriter(root.out, 0, 0, 2, ' ', 0)
 
-	fmt.Fprintln(table, "ROOM\tWITH\tSTATE\tVOLUME\tMUTED\tPLAYING\tADDRESS")
+	terminal.Printf(table, "ROOM\tWITH\tSTATE\tVOLUME\tMUTED\tPLAYING\tADDRESS\n")
 
 	for _, group := range system.Groups {
 		status, err := system.Status(ctx, group)
@@ -197,7 +196,7 @@ func (*roomsCommand) Run(ctx context.Context, root *rootCommand) error {
 				return err
 			}
 
-			fmt.Fprintf(table, "%q\t%s\t%s\t%d\t%s\t%s\t%s\n",
+			terminal.Printf(table, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 				member.Name, dash(others(group, member)), said(status.State), level, yesNo(muted),
 				dash(playing(status)), member.Host)
 		}
@@ -210,18 +209,17 @@ func (*roomsCommand) Run(ctx context.Context, root *rootCommand) error {
 	return nil
 }
 
-// others is the rooms member plays with; the names are their owner's
-// text.
+// others is the rooms member plays with.
 func others(group sonos.Group, member sonos.Player) string {
 	var names []string
 
 	for _, other := range group.Members {
 		if other.ID != member.ID {
-			names = append(names, strconv.Quote(other.Name))
+			names = append(names, other.Name)
 		}
 	}
 
-	return strings.Join(names, ",")
+	return strings.Join(names, ", ")
 }
 
 func (cmd *statusCommand) Run(ctx context.Context, root *rootCommand) error {
@@ -242,22 +240,21 @@ func (cmd *statusCommand) Run(ctx context.Context, root *rootCommand) error {
 
 	table := tabwriter.NewWriter(root.out, 0, 0, 1, ' ', 0)
 
-	fmt.Fprintf(table, "state:\t%s\n", said(status.State))
+	terminal.Printf(table, "state:\t%s\n", said(status.State))
 
-	// What the source says of the track is not this command's text.
 	for _, field := range [][2]string{
 		{"title", status.Title}, {"artist", status.Artist}, {"album", status.Album}, {"source", status.URI},
 	} {
 		if field[1] != "" {
-			fmt.Fprintf(table, "%s:\t%q\n", field[0], field[1])
+			terminal.Printf(table, "%s:\t%s\n", field[0], field[1])
 		}
 	}
 
 	switch {
 	case status.Duration > 0:
-		fmt.Fprintf(table, "position:\t%s of %s\n", clock(status.Position), clock(status.Duration))
+		terminal.Printf(table, "position:\t%s of %s\n", clock(status.Position), clock(status.Duration))
 	case status.Position > 0:
-		fmt.Fprintf(table, "position:\t%s\n", clock(status.Position))
+		terminal.Printf(table, "position:\t%s\n", clock(status.Position))
 	}
 
 	if err = table.Flush(); err != nil {
@@ -337,7 +334,7 @@ func (cmd *volumeCommand) Run(ctx context.Context, root *rootCommand) error {
 		return err
 	}
 
-	fmt.Fprintln(root.out, level)
+	terminal.Printf(root.out, "%d\n", level)
 
 	return nil
 }
@@ -408,7 +405,7 @@ func (*householdCommand) Run(ctx context.Context, root *rootCommand) error {
 		return err
 	}
 
-	fmt.Fprintf(root.out, "%q\n", household)
+	terminal.Printf(root.out, "%s\n", household)
 
 	return nil
 }
@@ -426,7 +423,7 @@ func said(state sonos.State) string {
 	case sonos.Transitioning:
 		return "starting"
 	default:
-		return strconv.Quote(string(state))
+		return string(state)
 	}
 }
 
@@ -437,9 +434,9 @@ func playing(status sonos.Status) string {
 	case status.Title == "":
 		return ""
 	case status.Artist == "":
-		return strconv.Quote(status.Title)
+		return status.Title
 	default:
-		return strconv.Quote(status.Title + " - " + status.Artist)
+		return status.Title + " - " + status.Artist
 	}
 }
 

@@ -30,9 +30,9 @@ func TestDiscover(t *testing.T) {
 
 	want := []string{
 		"SPEAKER ROOM AT FROM",
-		`"` + kitchen.UUID + `" "Kitchen" "` + kitchen.URL + `/xml/device_description.xml" 127.0.0.1`,
-		`"` + den.UUID + `" "Den" "` + den.URL + `/xml/device_description.xml" 127.0.0.1`,
-		`"` + sub.UUID + `" - "` + sub.URL + `/xml/device_description.xml" 127.0.0.1`,
+		kitchen.UUID + " Kitchen " + kitchen.URL + "/xml/device_description.xml 127.0.0.1",
+		den.UUID + " Den " + den.URL + "/xml/device_description.xml 127.0.0.1",
+		sub.UUID + " - " + sub.URL + "/xml/device_description.xml 127.0.0.1",
 	}
 	if got := rows(out); status != cli.ExitOK || errs != "" || strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf(
@@ -73,7 +73,7 @@ func TestDiscoverUnopened(t *testing.T) {
 
 	out, errs, status := runOn(t, advertised(kitchen), "--wait", "200ms", "discover")
 
-	want := `"` + kitchen.UUID + `" - "` + kitchen.URL + `/xml/device_description.xml" 127.0.0.1`
+	want := kitchen.UUID + " - " + kitchen.URL + "/xml/device_description.xml 127.0.0.1"
 	if got := rows(out); status != cli.ExitError || len(got) != 2 || got[1] != want ||
 		!strings.Contains(errs, "forbids UPnP control") || !strings.Contains(errs, "Privacy and Security, UPnP") {
 		t.Errorf("discover of a household with UPnP off exits %d, saying %q and\n%s", status, errs, out)
@@ -92,9 +92,9 @@ func TestSearched(t *testing.T) {
 
 	want := []string{
 		"ROOM WITH STATE VOLUME MUTED PLAYING ADDRESS",
-		`"Kitchen" - stopped 20 no - ` + kitchen.Host(),
-		`"Den" "Porch" playing 20 no "A Song - A Band" ` + den.Host(),
-		`"Porch" "Den" playing 35 yes "A Song - A Band" ` + porch.Host(),
+		"Kitchen - stopped 20 no - " + kitchen.Host(),
+		"Den Porch playing 20 no A Song - A Band " + den.Host(),
+		"Porch Den playing 35 yes A Song - A Band " + porch.Host(),
 	}
 	if got := rows(out); status != cli.ExitOK || errs != "" || strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("rooms by search exits %d, saying %q and\n%s", status, errs, strings.Join(got, "\n"))

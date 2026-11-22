@@ -12,6 +12,7 @@ import (
 	"github.com/forkcloser/go-upnp/ssdp"
 	"github.com/mycophonic/primordium/fault"
 
+	"github.com/duncanite/go-sonos/internal/terminal"
 	"github.com/duncanite/go-sonos/sonos"
 )
 
@@ -138,7 +139,7 @@ func (*discoverCommand) Run(ctx context.Context, root *rootCommand) error {
 	}
 
 	if len(speakers) == 0 {
-		fmt.Fprintln(root.out, "No speaker answered.")
+		terminal.Printf(root.out, "No speaker answered.\n")
 
 		return nil
 	}
@@ -151,14 +152,14 @@ func (*discoverCommand) Run(ctx context.Context, root *rootCommand) error {
 	if opening == nil {
 		for _, group := range system.Groups {
 			for _, member := range group.Members {
-				rooms[member.ID] = fmt.Sprintf("%q", member.Name)
+				rooms[member.ID] = member.Name
 			}
 		}
 	}
 
 	table := tabwriter.NewWriter(root.out, 0, 0, 2, ' ', 0)
 
-	fmt.Fprintln(table, "SPEAKER\tROOM\tAT\tFROM")
+	terminal.Printf(table, "SPEAKER\tROOM\tAT\tFROM\n")
 
 	for _, speaker := range speakers {
 		where, from := "", ""
@@ -166,10 +167,10 @@ func (*discoverCommand) Run(ctx context.Context, root *rootCommand) error {
 		// The first place it was heard at: the one the household is
 		// asked at.
 		if len(speaker.Locations) > 0 {
-			where, from = fmt.Sprintf("%q", speaker.Locations[0].URL), address(speaker.Locations[0].Local)
+			where, from = speaker.Locations[0].URL, address(speaker.Locations[0].Local)
 		}
 
-		fmt.Fprintf(table, "%q\t%s\t%s\t%s\n", string(speaker.ID), dash(rooms[speaker.ID]), dash(where), dash(from))
+		terminal.Printf(table, "%s\t%s\t%s\t%s\n", speaker.ID, dash(rooms[speaker.ID]), dash(where), dash(from))
 	}
 
 	if err = table.Flush(); err != nil {
