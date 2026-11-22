@@ -142,15 +142,14 @@ The library reads no file, writes no log, and opens no socket to find a speaker.
   and `Master` is the speaker's. A change carries only what changed, so `Watch` keeps
   what each speaker said and tells the whole. A speaker's events say nothing of the
   position in a track; `Status` asks.
-- **What a speaker wrote is quoted on the terminal.** A room's name and a track's title
-  are printed quoted, and what a speaker says in refusing an action is written with its
-  control and direction characters escaped: a name with a line's end in it forges no line
-  of the command's output.
-- **What a speaker refuses is told apart**: a UPnP fault with its code, a 403, and an
-  answer that is not the documented SOAP. The 403 is what Home Assistant's page gives for
-  the UPnP setting turned off: "403 Client Error: Forbidden", "This error means UPnP is
-  not properly enabled on your Sonos system". The community's documentation of the
-  services says nothing of it.
+- **The command shows a speaker's text and never obeys it.** A room's name, a track's
+  title and what a speaker says in refusing an action are whatever the speaker, or
+  whoever answers for it, wrote. Every line the command prints goes through
+  `internal/terminal`, which writes out, as Go writes them in a string, each character a
+  terminal would not simply draw: a control or a direction mark, a line's end, a tab, a
+  byte that is no text. A name with a line's end in it forges no line of the command's
+  output. A test reads the command's source and fails on a line printed any other way,
+  since no test of what is printed could name every line there will be.
 
 ### Not built
 

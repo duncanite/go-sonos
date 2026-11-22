@@ -13,6 +13,7 @@ import (
 
 	"github.com/mycophonic/primordium/fault"
 
+	"github.com/duncanite/go-sonos/internal/terminal"
 	"github.com/duncanite/go-sonos/sonos"
 )
 
@@ -46,7 +47,7 @@ func (cmd *watchCommand) Run(ctx context.Context, root *rootCommand) error {
 
 	callback := "http://" + net.JoinHostPort(reached, strconv.Itoa(int(events.Addr().Port()))) + "/"
 
-	fmt.Fprintf(root.out, "watching; callback %s\n", callback)
+	terminal.Printf(root.out, "watching; callback %s\n", callback)
 
 	// The household's first event, its groups, comes within a second of
 	// the Watch on its own network; with none by the first event's time
@@ -125,18 +126,18 @@ func (p *printer) print(event sonos.Event) {
 
 			for _, member := range group.Members {
 				p.rooms[member.ID] = member.Name
-				names = append(names, strconv.Quote(member.Name))
+				names = append(names, member.Name)
 			}
 
-			groups = append(groups, strings.Join(names, "+"))
+			groups = append(groups, strings.Join(names, " + "))
 		}
 
-		fmt.Fprintf(p.out, "%s groups: %s\n", now, dash(strings.Join(groups, " | ")))
+		terminal.Printf(p.out, "%s groups: %s\n", now, dash(strings.Join(groups, " | ")))
 	case sonos.Played:
-		fmt.Fprintf(p.out, "%s %s: %s %s\n", now, p.room(told.Coordinator), said(told.Status.State),
+		terminal.Printf(p.out, "%s %s: %s %s\n", now, p.room(told.Coordinator), said(told.Status.State),
 			dash(playing(told.Status)))
 	case sonos.Sounded:
-		fmt.Fprintf(p.out, "%s %s: volume %d, muted %s\n", now, p.room(told.Player), told.Volume, yesNo(told.Muted))
+		terminal.Printf(p.out, "%s %s: volume %d, muted %s\n", now, p.room(told.Player), told.Volume, yesNo(told.Muted))
 	}
 }
 
@@ -144,10 +145,10 @@ func (p *printer) print(event sonos.Event) {
 // room: the second of a pair that coordinates a group.
 func (p *printer) room(id sonos.ID) string {
 	if name, known := p.rooms[id]; known {
-		return strconv.Quote(name)
+		return name
 	}
 
-	return strconv.Quote(string(id))
+	return string(id)
 }
 
 // localHostToward is this host's address on the way to host, read off a

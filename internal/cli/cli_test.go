@@ -124,21 +124,21 @@ func TestReading(t *testing.T) {
 	}{
 		{[]string{"rooms"}, []string{
 			"ROOM WITH STATE VOLUME MUTED PLAYING ADDRESS",
-			`"Kitchen" - stopped 20 no - ` + kitchen.Host(),
-			`"Den" "Porch" playing 20 no "A Song - A Band" ` + den.Host(),
-			`"Porch" "Den" playing 35 yes "A Song - A Band" ` + porch.Host(),
+			"Kitchen - stopped 20 no - " + kitchen.Host(),
+			"Den Porch playing 20 no A Song - A Band " + den.Host(),
+			"Porch Den playing 35 yes A Song - A Band " + porch.Host(),
 		}},
 		{[]string{"status", "porch"}, []string{
 			"state: playing",
-			`title: "A Song"`,
-			`artist: "A Band"`,
-			`source: "x-sonos-http:track.mp4"`,
+			"title: A Song",
+			"artist: A Band",
+			"source: x-sonos-http:track.mp4",
 			"position: 0:01:05 of 0:03:20",
 		}},
 		{[]string{"status", "Kitchen"}, []string{"state: stopped"}},
 		{[]string{"volume", "Porch"}, []string{"35"}},
 		{[]string{"volume", "Porch", "--group"}, []string{"27"}},
-		{[]string{"household"}, []string{`"` + house.ID + `"`}},
+		{[]string{"household"}, []string{house.ID}},
 	} {
 		out, errs, status := run(t, house, step.args...)
 		if got := rows(

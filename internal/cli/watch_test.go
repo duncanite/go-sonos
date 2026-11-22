@@ -122,12 +122,12 @@ func TestWatching(t *testing.T) {
 	} {
 		running.says(
 			"watching; callback http://127.0.0.1:",
-			` groups: "Kitchen" | "Den"+"Porch"`+"\n",
-			` "Kitchen": stopped -`+"\n",
-			` "Den": playing "A Song - A Band"`+"\n",
-			` "Kitchen": volume 20, muted no`+"\n",
-			` "Den": volume 20, muted no`+"\n",
-			` "Porch": volume 35, muted yes`+"\n",
+			" groups: Kitchen | Den + Porch\n",
+			" Kitchen: stopped -\n",
+			" Den: playing A Song - A Band\n",
+			" Kitchen: volume 20, muted no\n",
+			" Den: volume 20, muted no\n",
+			" Porch: volume 35, muted yes\n",
 		)
 
 		t.Logf("%s: the household as it stands is printed", name)
@@ -136,7 +136,7 @@ func TestWatching(t *testing.T) {
 	// The first event's time is past before the first change: it bounds
 	// the first event and nothing after it.
 	running := start(t, ssdptest.NewHost(), "--host", den.Host(), "watch", "--first-event", "300ms")
-	running.says(` "Porch": volume 35, muted yes` + "\n")
+	running.says(" Porch: volume 35, muted yes\n")
 
 	time.Sleep(time.Second / 2)
 
@@ -144,11 +144,11 @@ func TestWatching(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"pause", "Porch"}, ` "Den": paused "A Song - A Band"` + "\n"},
-		{[]string{"volume", "Porch", "40"}, ` "Porch": volume 40, muted yes` + "\n"},
-		{[]string{"unmute", "Porch"}, ` "Porch": volume 40, muted no` + "\n"},
-		{[]string{"join", "Kitchen", "Den"}, ` groups: "Kitchen"+"Den"+"Porch"` + "\n"},
-		{[]string{"leave", "Porch"}, ` groups: "Kitchen"+"Den" | "Porch"` + "\n"},
+		{[]string{"pause", "Porch"}, " Den: paused A Song - A Band\n"},
+		{[]string{"volume", "Porch", "40"}, " Porch: volume 40, muted yes\n"},
+		{[]string{"unmute", "Porch"}, " Porch: volume 40, muted no\n"},
+		{[]string{"join", "Kitchen", "Den"}, " groups: Kitchen + Den + Porch\n"},
+		{[]string{"leave", "Porch"}, " groups: Kitchen + Den | Porch\n"},
 	} {
 		if _, errs, status := run(t, house, step.args...); status != cli.ExitOK {
 			t.Fatalf("%v exits %d saying %q", step.args, status, errs)
@@ -208,8 +208,9 @@ func TestWatchingFails(t *testing.T) {
 }
 
 // TestASpeakersWords: what a speaker says is shown and never obeyed. A
-// room's name is quoted wherever it is printed, and what a speaker says in
-// refusing is written out: a line's end in it is no line of the command's.
+// room's name is written out wherever it is printed, and so is what a
+// speaker says in refusing: a line's end in it is no line of the
+// command's.
 func TestASpeakersWords(t *testing.T) {
 	t.Parallel()
 
@@ -218,7 +219,7 @@ func TestASpeakersWords(t *testing.T) {
 	house := sonostest.New(hostile, "Porch")
 	t.Cleanup(house.Close)
 
-	shown := `"Den\nsonos: all is well\u202e\u009b2J"`
+	shown := `Den\nsonos: all is well\u202e\u009b2J`
 
 	out, errs, status := run(t, house, "rooms")
 	if status != cli.ExitOK || errs != "" || strings.Count(out, "\n") != 3 || !strings.Contains(out, shown) {
@@ -231,7 +232,7 @@ func TestASpeakersWords(t *testing.T) {
 	}
 
 	running := start(t, ssdptest.NewHost(), "--host", house.Speakers[0].Host(), "watch")
-	running.says(" groups: "+shown+` | "Porch"`+"\n", " "+shown+": volume 20, muted no\n")
+	running.says(" groups: "+shown+" | Porch\n", " "+shown+": volume 20, muted no\n")
 	running.stop()
 
 	if status = running.ends(); status != cli.ExitOK || strings.Contains(running.out.String(), "\nsonos:") {
